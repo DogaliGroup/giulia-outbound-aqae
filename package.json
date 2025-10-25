@@ -1,0 +1,15 @@
+{
+  "name": "giulia-outbound-aqae",
+  "version": "1.0.0",
+  "description": "Server outbound calls con Twilio, Make e Railway",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "twilio": "^4.22.0"
+  }
+}
