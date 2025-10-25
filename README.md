@@ -5,7 +5,7 @@ Il bot usa ElevenLabs per TTS, STT (se disponibile) o Whisper, Twilio per chiama
 
 ---
 
-## Panoramica veloce
+## Panoramica veloce del progetto
 Flusso:
 1. Make legge il Google Sheet e chiama l'endpoint `/start-call` del server (Railway).  
 2. Server avvia una chiamata Twilio che riproduce `public/audio/silence.mp3` e registra la risposta del cliente.  
