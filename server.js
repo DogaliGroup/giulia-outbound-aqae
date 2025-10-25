@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
+const fetch = require('node-fetch'); // serve per chiamare Make
 const app = express();
+
 const generateAudio = require('./lib/generateAudio');
 const uploadAudio = require('./lib/uploadAudio');
 const makeCall = require('./lib/makeCall');
@@ -10,9 +12,10 @@ const transcribeAudio = require('./lib/transcribeAudio');
 app.use(express.json());
 app.use(express.static('public')); // serve /public/audio
 
+// Health check
 app.get('/health', (req, res) => res.send('OK'));
 
-// Avvia chiamata: user speaks first (Play silence.mp3 then Record)
+// Avvia chiamata da Make
 app.post('/start-call', async (req, res) => {
   try {
     if (req.headers.authorization !== `Bearer ${process.env.AUTH_TOKEN_MAKE}`) {
@@ -22,32 +25,59 @@ app.post('/start-call', async (req, res) => {
     if (!phone_number) return res.status(400).send('Missing phone_number');
 
     const silenceUrl = `${process.env.SERVER_BASE_URL.replace(/\/$/, '')}/audio/silence.mp3`;
-    await makeCall(phone_number, silenceUrl, { row_id, first_name });
+    const call = await makeCall(phone_number, silenceUrl, { row_id, first_name });
 
-    return res.json({ status: 'queued' });
+    // Rispondi a Make con info utili
+    return res.json({
+      status: 'queued',
+      call_sid: call.sid,
+      audioUrl: silenceUrl
+    });
   } catch (e) {
     console.error('start-call error', e);
     return res.status(500).send('Errore interno');
   }
 });
 
-// Webhook Twilio: riceve recording quando Record termina
+// Callback Twilio: riceve recording
 app.post('/recording-callback', async (req, res) => {
   try {
     const recordingUrl = req.body.RecordingUrl || req.body.recordingUrl;
     const from = req.body.From || req.body.from;
+    const callSid = req.body.CallSid || req.body.callSid;
+    const row_id = req.body.row_id || null;
+
     if (!recordingUrl || !from) {
       console.warn('Missing recordingUrl or From in callback', req.body);
       return res.status(400).send('Bad Request');
     }
 
+    // Trascrivi audio
     const transcript = await transcribeAudio(recordingUrl);
+
+    // Genera risposta audio
     const replyPrompt = buildPrompt(transcript, { from });
     const audioBuffer = await generateAudio(replyPrompt);
     const filename = `response_${Date.now()}.mp3`;
     const audioUrl = await uploadAudio(audioBuffer, filename);
 
-    // Rispondi creando una nuova chiamata che riproduce la risposta
+    // Inoltra i dati a Make
+    if (process.env.MAKE_WEBHOOK_URL) {
+      await fetch(process.env.MAKE_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          row_id,
+          call_sid: callSid,
+          transcript,
+          audio_url: audioUrl,
+          stato_chiamata: 'chiamata_effettuata',
+          timestamp: new Date().toISOString()
+        })
+      });
+    }
+
+    // (Opzionale) fai una nuova chiamata con la risposta
     await makeCall(from, audioUrl, { tag: filename });
 
     return res.send('OK');
@@ -57,9 +87,32 @@ app.post('/recording-callback', async (req, res) => {
   }
 });
 
-app.post('/call-status', (req, res) => {
-  console.log('Call status:', req.body);
-  res.send('OK');
+// Callback Twilio: stato chiamata
+app.post('/call-status', async (req, res) => {
+  try {
+    const callSid = req.body.CallSid;
+    const callStatus = req.body.CallStatus;
+
+    console.log('Call status:', callSid, callStatus);
+
+    // Inoltra a Make
+    if (process.env.MAKE_WEBHOOK_URL) {
+      await fetch(process.env.MAKE_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          call_sid: callSid,
+          stato_chiamata: callStatus,
+          timestamp: new Date().toISOString()
+        })
+      });
+    }
+
+    res.send('OK');
+  } catch (e) {
+    console.error('call-status error', e);
+    res.status(500).send('Errore interno');
+  }
 });
 
 const port = process.env.PORT || 3000;
