@@ -1,0 +1,41 @@
+{
+  "agent": "Giulia",
+  "language": "it-IT",
+  "tts_voice_id": "ELEVEN_VOICE_ID",
+  "tts_model_id": "ELEVEN_MODEL_ID",
+  "stt_model": "eleven_realtime_stt",
+  "script": {
+    "opening": "Buongiorno {{first_name}}, sono Giulia, questo è un messaggio automatico integrato con l'Intelligenza artificiale, chiamo per la segnalazione ricevuta in merito ai problemi di copertura internet, da quanto tempo stai riscontrando problemi di navigazione?",
+    "who_and_confirm": "Sono l’amministrativo che segue i tuoi contratti fissi e mobili. Da sistema vedo che il ripetitore vicino a te da problemi di navigazione. provvedo subito ad aprire una segnalazione guasti. Da sistema vedo anche fatture altalenanti. Hai ricevuto sms per servizi sospetti?",
+    "ask_sim_indirect": "Se non hai fatto nessuna disattivazione, per evitare di pagare schede che non fanno traffico, quante delle tue schede aziendali stai utilizzando realmente? Cosi facciamo un controllo incrociato con quello che vedo da sistema.",
+    "propose_count": "Io da sistema vedo che hai 3 schede aziendali, giusto?",
+    "ask_sim_follow": "Probabilmente il dato che io ho non è completo perchè hai più centri di fatturazione, quante schede utilizzi realmente?",
+    "bill_template": "Da sistema vedo che la bolletta negli ultimi mesi si è collocata tra {{X}} e {{Y}} euro.",
+    "operator_suggestion": "Noto più centri di fatturazione, come Wind3 e Vodafone. Puoi aver ricevuto fatture duplicate?",
+    "closure": "Confermerò con l’amministrazione e ti richiamerò personalmente per aggiornamenti."
+  },
+  "timeouts": {
+    "call_connect_timeout_seconds": 30,
+    "silence_threshold_seconds": 5,
+    "utterance_max_seconds": 22,
+    "conversation_idle_timeout_seconds": 60
+  },
+  "machine_detection": {
+    "enabled": true,
+    "timeout_seconds": 5,
+    "action_on_machine": "leave-message-or-end" 
+  },
+  "media": {
+    "twilio_stream_path": "/stream",
+    "audio_sample_rate": 8000,
+    "audio_encoding": "mulaw" 
+  },
+  "billing_rules": {
+    "per_sim_min": 10,
+    "per_sim_max": 15
+  },
+  "safety": {
+    "no_direct_questions": true,
+    "avoid_phrase": ["dovrebbe", "forse"]
+  }
+}
