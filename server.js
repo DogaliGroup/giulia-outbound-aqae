@@ -15,6 +15,18 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public')); // serve file statici (es. /public/audio/silence.mp3)
 
+// Simple request logger for Twilio-related endpoints (preserva body per debug)
+app.use((req, res, next) => {
+  if ((req.path || '').startsWith('/twilio') || req.path === '/start-call') {
+    try {
+      console.log('INCOMING HTTP', req.method, req.path, 'Query:', req.query, 'Body:', JSON.stringify(req.body).slice(0,2000));
+    } catch (e) {
+      console.log('INCOMING HTTP (could not stringify body)', req.method, req.path);
+    }
+  }
+  next();
+});
+
 // Import librerie custom (mantieni i tuoi percorsi)
 const generateAudio = require('./lib/generateAudio');
 const uploadAudio = require('./lib/uploadAudio');
@@ -71,7 +83,7 @@ app.post('/start-call', async (req, res) => {
       audioUrl: silenceUrl
     });
   } catch (e) {
-    console.error('start-call error', e);
+    console.error('start-call error', e && e.stack ? e.stack : e);
     return res.status(500).send('Errore interno');
   }
 });
@@ -133,7 +145,7 @@ app.post('/twilio/recording', async (req, res) => {
 
     return res.send('OK');
   } catch (e) {
-    console.error('twilio/recording error', e);
+    console.error('twilio/recording error', e && e.stack ? e.stack : e);
     return res.status(500).send('Errore interno');
   }
 });
@@ -185,7 +197,7 @@ app.post('/twilio/status', async (req, res) => {
 
     res.send('OK');
   } catch (e) {
-    console.error('twilio/status error', e);
+    console.error('twilio/status error', e && e.stack ? e.stack : e);
     res.status(500).send('Errore interno');
   }
 });
@@ -208,7 +220,7 @@ app.post('/twilio/transcribe', async (req, res) => {
     }
     res.send('OK');
   } catch (e) {
-    console.error('twilio/transcribe error', e);
+    console.error('twilio/transcribe error', e && e.stack ? e.stack : e);
     res.status(500).send('Errore interno');
   }
 });
@@ -217,13 +229,19 @@ app.post('/twilio/transcribe', async (req, res) => {
 // WebSocket server per Twilio Media Streams
 // -----------------------------
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path ? CALL_PROFILE.media.twilio_stream_path : '/stream' });
+const wss = new WebSocket.Server({
+  server,
+  path: CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path ? CALL_PROFILE.media.twilio_stream_path : '/stream'
+});
 
+// WSS: gestione connessioni con logging esteso
 wss.on('connection', (ws, req) => {
   const fullUrl = req.url || '';
   const query = fullUrl.split('?')[1] || '';
   const qs = new URLSearchParams(query);
   const callSid = qs.get('callSid') || `cs_${Date.now()}`;
+
+  console.log('WS: incoming connection', { url: req.url, callSid, headers: req.headers });
 
   // inizializza sessione
   sessions[callSid] = sessions[callSid] || {
@@ -241,6 +259,7 @@ wss.on('connection', (ws, req) => {
       // Twilio invia string JSON con eventi o binary; gestiamo JSON event.media base64
       if (typeof msg === 'string') {
         const evt = JSON.parse(msg);
+        console.log('WS event', evt.event, 'for', callSid);
         if (evt.event === 'connected') {
           console.log('Media stream connected event for', callSid);
         } else if (evt.event === 'media' && evt.media && evt.media.payload) {
@@ -251,20 +270,30 @@ wss.on('connection', (ws, req) => {
         } else if (evt.event === 'start') {
           // ignora o logga
         } else if (evt.event === 'stop') {
+          console.log('WS stop event for', callSid);
           cleanupSession(callSid);
         }
       } else {
         // binary payload - invio diretto ad STT
+        console.log('WS binary message received for', callSid, 'len:', msg.length);
         await forwardAudioChunkToSTT(callSid, msg);
       }
     } catch (err) {
-      console.error('WS message error', err);
+      console.error('WS message error', err && err.stack ? err.stack : err);
     }
   });
 
-  ws.on('close', () => {
-    console.log('WS closed for', callSid);
+  ws.on('close', (code, reason) => {
+    console.log('WS closed for', callSid, 'code:', code, 'reason:', reason && reason.toString && reason.toString());
     cleanupSession(callSid);
+  });
+
+  ws.on('error', (err) => {
+    console.error('WS error for', callSid, err && err.stack ? err.stack : err);
+  });
+
+  ws.on('unexpected-response', (req, res) => {
+    console.warn('WS unexpected-response for', callSid, 'statusCode:', res && res.statusCode);
   });
 });
 
@@ -360,7 +389,7 @@ async function handleSttFinal(callSid, text) {
       });
     }
   } catch (err) {
-    console.error('Errore generazione reply audio', err);
+    console.error('Errore generazione reply audio', err && err.stack ? err.stack : err);
   }
 }
 
