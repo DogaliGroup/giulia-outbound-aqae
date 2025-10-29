@@ -234,7 +234,8 @@ app.post('/twilio/transcribe', async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({
   server,
-  path: CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path ? CALL_PROFILE.media.twilio_stream_path : '/stream'
+  path: CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path ? CALL_PROFILE.media.twilio_stream_path : '/twilio'
+
 });
 
 // WSS: gestione connessioni con logging esteso
