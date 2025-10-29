@@ -1,10 +1,10 @@
 // server.js
-// Carica variabili d'ambiente e moduli base
 require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
 const http = require('http');
 const WebSocket = require('ws');
+const fs = require('fs');
 const path = require('path');
 
 // Carica profilo di chiamata
@@ -12,13 +12,11 @@ const { CALL_PROFILE } = require('./config');
 
 // Express app
 const app = express();
-// subito dopo: const app = express();
-app.use(express.urlencoded({ extended: false })); // <- necessario per Twilio callbacks (form data)
-app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // necessario per Twilio callbacks (form data)
 app.use(express.json());
 app.use(express.static('public')); // serve file statici (es. /public/audio/silence.mp3)
 
-// Simple request logger for Twilio-related endpoints (preserva body per debug)
+// Simple request logger per endpoint Twilio/Start
 app.use((req, res, next) => {
   if ((req.path || '').startsWith('/twilio') || req.path === '/start-call') {
     try {
@@ -30,85 +28,63 @@ app.use((req, res, next) => {
   next();
 });
 
-// Import librerie custom (mantieni i tuoi percorsi)
+// Import librerie custom (stub se mancanti)
 const generateAudio = require('./lib/generateAudio');
 const uploadAudio = require('./lib/uploadAudio');
 const makeCall = require('./lib/makeCall');
 const buildPrompt = require('./lib/promptBuilder');
 const transcribeAudio = require('./lib/transcribeAudio');
 
-// Session store in-memory (per test). Sostituire con Redis in produzione.
+// Session store in-memory (per test)
 const sessions = {};
 
-// Helper: crea meta token base64 (usa per collegare row_id/first_name alle sessioni)
 function makeMetaToken(metaObj = {}) {
-  try {
-    return Buffer.from(JSON.stringify(metaObj)).toString('base64');
-  } catch (e) {
-    return '';
-  }
+  try { return Buffer.from(JSON.stringify(metaObj)).toString('base64'); } catch (e) { return ''; }
 }
-
-// Helper: pulizia sessione
 function cleanupSession(callSid) {
   if (sessions[callSid]) {
-    // eventuale cleanup risorse (connessioni STT/TTS)
     delete sessions[callSid];
     console.log('Cleaned session', callSid);
   }
 }
 
-// Health check
+// Health
 app.get('/health', (req, res) => res.send('OK'));
 
-// -----------------------------
-// ENDPOINT: avvio chiamata da Make
-// -----------------------------
+// START CALL endpoint (Make -> server)
 app.post('/start-call', async (req, res) => {
   try {
     if (req.headers.authorization !== `Bearer ${process.env.AUTH_TOKEN_MAKE}`) {
       return res.status(403).send('Forbidden');
     }
-
     const { first_name, phone_number, row_id } = req.body;
     if (!phone_number) return res.status(400).send('Missing phone_number');
 
     const silenceUrl = `${process.env.SERVER_BASE_URL.replace(/\/$/, '')}/audio/silence.mp3`;
-    // meta token con row_id e first_name
     const metaToken = makeMetaToken({ row_id, first_name });
 
-    // makeCall deve essere aggiornato per accettare CALL_PROFILE e costruire TwiML
     const callSid = await makeCall(phone_number, silenceUrl, { row_id, first_name, meta: metaToken }, CALL_PROFILE);
 
-    return res.json({
-      status: 'queued',
-      call_sid: callSid,
-      audioUrl: silenceUrl
-    });
+    return res.json({ status: 'queued', call_sid: callSid, audioUrl: silenceUrl });
   } catch (e) {
     console.error('start-call error', e && e.stack ? e.stack : e);
     return res.status(500).send('Errore interno');
   }
 });
 
-// -----------------------------
-// ENDPOINT: callback Twilio → registrazione completata
-// -----------------------------
+// Twilio recording callback
 app.post('/twilio/recording', async (req, res) => {
   try {
     const recordingUrl = req.body.RecordingUrl || req.body.recordingUrl;
     const from = req.body.From || req.body.from;
     const callSid = req.body.CallSid || req.body.callSid;
 
-    // Recupera row_id dai meta se presente (se passata come query su Twilio callbacks)
     let row_id = null;
     if (req.query.meta) {
       try {
         const decoded = Buffer.from(req.query.meta, 'base64').toString();
         row_id = JSON.parse(decoded).row_id || null;
-      } catch (err) {
-        console.warn('Errore decodifica meta:', err);
-      }
+      } catch (err) { console.warn('Errore decodifica meta:', err); }
     }
 
     if (!recordingUrl) {
@@ -116,16 +92,12 @@ app.post('/twilio/recording', async (req, res) => {
       return res.status(400).send('Bad Request');
     }
 
-    // Trascrivi audio (sync, basato su URL registrazione Twilio)
     const transcript = await transcribeAudio(recordingUrl);
-
-    // Genera risposta audio (non richiamiamo subito il cliente: produciamo solo file)
     const replyPrompt = buildPrompt(transcript, { from }, CALL_PROFILE);
     const audioBuffer = await generateAudio(replyPrompt, CALL_PROFILE);
     const filename = `response_${Date.now()}.mp3`;
     const audioUrl = await uploadAudio(audioBuffer, filename);
 
-    // Inoltra i dati a Make in formato uniforme
     if (process.env.MAKE_WEBHOOK_URL) {
       try {
         await fetch(process.env.MAKE_WEBHOOK_URL, {
@@ -153,9 +125,7 @@ app.post('/twilio/recording', async (req, res) => {
   }
 });
 
-// -----------------------------
-// ENDPOINT: callback Twilio → stato chiamata (con gestione AMD/voicemail)
-// -----------------------------
+// Twilio status callback (AMD/voicemail)
 app.post('/twilio/status', async (req, res) => {
   try {
     const callSid = req.body.CallSid || req.body.callSid;
@@ -164,36 +134,21 @@ app.post('/twilio/status', async (req, res) => {
 
     console.log('Call status:', callSid, callStatus, 'AnsweredBy:', answeredBy);
 
-    // Se Twilio segnala macchina/voicemail
     if (answeredBy && answeredBy.toLowerCase().includes('machine')) {
-      // Azione configurata nel profilo
       const action = CALL_PROFILE.machine_detection && CALL_PROFILE.machine_detection.action_on_machine;
       if (process.env.MAKE_WEBHOOK_URL) {
         await fetch(process.env.MAKE_WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'voicemail',
-            call_sid: callSid,
-            answered_by: answeredBy,
-            action,
-            timestamp: new Date().toISOString()
-          })
+          body: JSON.stringify({ type: 'voicemail', call_sid: callSid, answered_by: answeredBy, action, timestamp: new Date().toISOString() })
         });
       }
-      // Se preferisci mandare un message o chiudere, fallo lato makeCall / twiml; qui solo segnaliamo.
     } else {
-      // Normal human flow: inoltra status a Make
       if (process.env.MAKE_WEBHOOK_URL) {
         await fetch(process.env.MAKE_WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'status',
-            call_sid: callSid,
-            stato_chiamata: callStatus,
-            timestamp: new Date().toISOString()
-          })
+          body: JSON.stringify({ type: 'status', call_sid: callSid, stato_chiamata: callStatus, timestamp: new Date().toISOString() })
         });
       }
     }
@@ -205,20 +160,14 @@ app.post('/twilio/status', async (req, res) => {
   }
 });
 
-// -----------------------------
-// ENDPOINT: callback Twilio → trascrizione (se attiva transcribe="true")
-// -----------------------------
+// Twilio transcribe callback
 app.post('/twilio/transcribe', async (req, res) => {
   try {
     if (process.env.MAKE_WEBHOOK_URL) {
       await fetch(process.env.MAKE_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'transcribe',
-          payload: req.body,
-          timestamp: new Date().toISOString()
-        })
+        body: JSON.stringify({ type: 'transcribe', payload: req.body, timestamp: new Date().toISOString() })
       });
     }
     res.send('OK');
@@ -228,57 +177,70 @@ app.post('/twilio/transcribe', async (req, res) => {
   }
 });
 
-// -----------------------------
-// WebSocket server per Twilio Media Streams
-// -----------------------------
+// HTTP + WebSocket server
 const server = http.createServer(app);
-const wss = new WebSocket.Server({
-  server,
-  path: CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path ? CALL_PROFILE.media.twilio_stream_path : '/twilio'
 
-});
+// Use explicit path '/twilio' unless your CALL_PROFILE overrides it
+const wssPath = (CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path) ? CALL_PROFILE.media.twilio_stream_path : '/twilio';
+const wss = new WebSocket.Server({ server, path: wssPath });
 
-// WSS: gestione connessioni con logging esteso
+// WSS: gestione connessioni
 wss.on('connection', (ws, req) => {
   const fullUrl = req.url || '';
   const query = fullUrl.split('?')[1] || '';
   const qs = new URLSearchParams(query);
   const callSid = qs.get('callSid') || `cs_${Date.now()}`;
 
-  console.log('WS: incoming connection', { url: req.url, callSid, headers: req.headers });
+  console.log('WS: incoming connection', { url: req.url, callSid, headers: {
+    host: req.headers.host,
+    origin: req.headers.origin,
+    'user-agent': req.headers['user-agent'],
+    'sec-websocket-protocol': req.headers['sec-websocket-protocol']
+  }});
 
-  // inizializza sessione
-  sessions[callSid] = sessions[callSid] || {
-    state: 'OPENING',
-    transcript: [],
-    extracted: {},
-    speaking: false,
-    sttBuffer: [],
-    lastActivity: Date.now()
-  };
+  sessions[callSid] = sessions[callSid] || { state: 'OPENING', transcript: [], extracted: {}, speaking: false, sttBuffer: [], lastActivity: Date.now() };
   console.log('WS connected for', callSid);
+
+  // INVIO chunk di test immediato (serve per verificare che Twilio riproduca audio proveniente dall'orchestrator)
+  try {
+    let testB64 = null;
+    const b64Path = path.join(__dirname, 'public', 'audio', 'test16.b64');
+    if (fs.existsSync(b64Path)) {
+      testB64 = fs.readFileSync(b64Path, 'utf8');
+    } else {
+      const mp3Path = path.join(__dirname, 'public', 'audio', 'silence.mp3');
+      if (fs.existsSync(mp3Path)) {
+        const mp3buf = fs.readFileSync(mp3Path);
+        testB64 = mp3buf.toString('base64');
+      }
+    }
+    if (testB64) {
+      ws.send(JSON.stringify({ event: 'media', media: { payload: testB64 } }));
+      console.log('Sent initial test audio chunk to Twilio for', callSid);
+    } else {
+      console.warn('No test audio file found for immediate push (create public/audio/test16.b64 or use silence.mp3).');
+    }
+  } catch (e) {
+    console.error('Error sending test chunk', e && e.stack ? e.stack : e);
+  }
 
   ws.on('message', async (msg) => {
     try {
-      // Twilio invia string JSON con eventi o binary; gestiamo JSON event.media base64
       if (typeof msg === 'string') {
         const evt = JSON.parse(msg);
         console.log('WS event', evt.event, 'for', callSid);
         if (evt.event === 'connected') {
           console.log('Media stream connected event for', callSid);
         } else if (evt.event === 'media' && evt.media && evt.media.payload) {
-          // audio base64
           const audioBase64 = evt.media.payload;
-          // forward to STT pipeline (stub/placeholder)
           await forwardAudioChunkToSTT(callSid, audioBase64);
         } else if (evt.event === 'start') {
-          // ignora o logga
+          // no-op
         } else if (evt.event === 'stop') {
           console.log('WS stop event for', callSid);
           cleanupSession(callSid);
         }
       } else {
-        // binary payload - invio diretto ad STT
         console.log('WS binary message received for', callSid, 'len:', msg.length);
         await forwardAudioChunkToSTT(callSid, msg);
       }
@@ -301,82 +263,54 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// -----------------------------
-// PLACEHOLDER: forwardAudioChunkToSTT
-// - Questo è uno stub che salva chunks in sessione.
-// - Implementa qui la connessione persistente al tuo STT realtime (ElevenLabs/Whisper) e la logica di partial/final.
-// - Quando ricevi text final, chiama handleSttFinal(callSid, text).
-// -----------------------------
+// forwardAudioChunkToSTT (stub)
 async function forwardAudioChunkToSTT(callSid, audioBase64OrBinary) {
-  // Attualmente salva chunk in memoria; replace con invio allo STT realtime.
   const s = sessions[callSid];
   if (!s) return;
   s.lastActivity = Date.now();
 
-  // Normalizza input: se è Buffer (binary) convertilo in base64 string per debug
   let b64;
   if (Buffer.isBuffer(audioBase64OrBinary)) {
     b64 = audioBase64OrBinary.toString('base64');
   } else {
-    b64 = audioBase64OrBinary; // già base64 string
+    b64 = audioBase64OrBinary;
   }
 
-  // Buffer chunks (per test/inspezione)
   s.sttBuffer.push(b64);
 
-  // TODO: In una pipeline reale, invia chunk allo STT realtime e gestisci partial/final callbacks.
-  // Per testing locale, ogni N chunk o dopo tempo puoi simulare una trascrizione finale:
-  if (s.sttBuffer.length >= 30) { // soglia di esempio
-    // Simula un testo dal contenuto audio
+  // Simula trascrizione per test: dopo 30 chunk invoca handleSttFinal
+  if (s.sttBuffer.length >= 30) {
     const fakeText = 'Simulazione: ho problemi di navigazione da due giorni';
     await handleSttFinal(callSid, fakeText);
     s.sttBuffer = [];
   }
 }
 
-// -----------------------------
-// Gestione STT final: aggiornare session e decidere prossimo stato
-// - decideNextState, buildPromptForState e callLLM devono essere implementati nei rispettivi moduli.
-// - Qui chiami buildPrompt e generi TTS con elevenTTSstream (stub).
-// -----------------------------
+// handleSttFinal (flow minimale)
 async function handleSttFinal(callSid, text) {
   const s = sessions[callSid];
   if (!s) return;
   s.transcript.push(text);
   s.lastActivity = Date.now();
 
-  // semplice extraction numerica (regex)
   const simMatch = text.match(/(\d+)\s*(schede|sim|simcard|scheda)/i);
-  if (simMatch) {
-    s.extracted.sim_count = parseInt(simMatch[1], 10);
-  }
+  if (simMatch) s.extracted.sim_count = parseInt(simMatch[1], 10);
 
-  // Decide next state (semplice rule)
-  if (!s.extracted.sim_count) {
-    s.state = 'ASK_SIM';
-  } else {
-    s.state = 'ASK_BILL';
-  }
+  s.state = s.extracted.sim_count ? 'ASK_BILL' : 'ASK_SIM';
 
-  // Costruisci prompt testuale usando buildPrompt (implementa buildPrompt per usare CALL_PROFILE.script)
   let promptText;
   try {
-    promptText = buildPrompt(s.state, s, CALL_PROFILE); // implementa buildPrompt(state, session, CALL_PROFILE)
+    promptText = buildPrompt(s.state, s, CALL_PROFILE);
   } catch (err) {
-    // fallback conservativo
     promptText = CALL_PROFILE.script && CALL_PROFILE.script.opening ? CALL_PROFILE.script.opening : 'Buongiorno';
   }
 
-  // Genera audio con generateAudio (sincrono, fallback a file)
   try {
     const audioBuffer = await generateAudio(promptText, CALL_PROFILE);
-    // In un flusso reale dobbiamo inviare audioBuffer in streaming a Twilio via Media bridge
-    // Per ora upload e log
     const filename = `prompt_${callSid}_${Date.now()}.mp3`;
     const audioUrl = await uploadAudio(audioBuffer, filename);
     console.log('Generated reply audioUrl for', callSid, audioUrl);
 
-    // Segnala a Make la reply testuale e i dati estratti
     if (process.env.MAKE_WEBHOOK_URL) {
       await fetch(process.env.MAKE_WEBHOOK_URL, {
         method: 'POST',
@@ -397,9 +331,7 @@ async function handleSttFinal(callSid, text) {
   }
 }
 
-// -----------------------------
-// Avvio server HTTP + WS
-// -----------------------------
+// Avvio server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server + WS attivo su porta ${PORT}`);
