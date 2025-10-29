@@ -12,6 +12,9 @@ const { CALL_PROFILE } = require('./config');
 
 // Express app
 const app = express();
+// subito dopo: const app = express();
+app.use(express.urlencoded({ extended: false })); // <- necessario per Twilio callbacks (form data)
+app.use(express.json());
 app.use(express.json());
 app.use(express.static('public')); // serve file statici (es. /public/audio/silence.mp3)
 
