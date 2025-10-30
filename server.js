@@ -27,7 +27,6 @@ app.use(express.static('public'));
 
 // Permetti connessioni websocket dal browser verso il tuo dominio (modifica per produzione)
 app.use((req, res, next) => {
-  // consente risorse da se stesso; consente connect only a wss sul tuo dominio
   const domain = (process.env.SERVER_BASE_URL || 'https://giulia-outbound-aqae.up.railway.app').replace(/^https?:\/\//, '');
   const csp = [
     "default-src 'self' 'unsafe-inline' https: data:",
@@ -152,6 +151,7 @@ app.post('/twilio/transcribe', async (req, res) => {
 // HTTP + WSS server
 const server = http.createServer(app);
 const wssPath = (CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path) ? CALL_PROFILE.media.twilio_stream_path : '/twilio';
+
 // Debug upgrade: logga ogni richiesta di upgrade (handshake WS) per capire perché viene rifiutata
 server.on('upgrade', (req, socket, head) => {
   try {
@@ -165,6 +165,7 @@ server.on('upgrade', (req, socket, head) => {
   }
   // Non chiudere la socket qui: lascia che WebSocket.Server la gestisca
 });
+
 const wss = new WebSocket.Server({ server, path: wssPath });
 
 // WSS connection handler
