@@ -152,7 +152,7 @@ app.post('/twilio/transcribe', async (req, res) => {
 const server = http.createServer(app);
 const wssPath = (CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path) ? CALL_PROFILE.media.twilio_stream_path : '/twilio';
 
-// Debug upgrade: logga ogni richiesta di upgrade (handshake WS) per capire perché viene rifiutata
+// Debug: log upgrade request and forward to WebSocket.Server using handleUpgrade
 server.on('upgrade', (req, socket, head) => {
   try {
     console.log('--- UPGRADE REQUEST ---');
@@ -163,10 +163,43 @@ server.on('upgrade', (req, socket, head) => {
   } catch (e) {
     console.error('upgrade log error', e && e.message ? e.message : e);
   }
-  // Non chiudere la socket qui: lascia che WebSocket.Server la gestisca
+
+  // If path doesn't match wssPath, let WebSocket.Server decide; still attempt to handle upgrade
+  try {
+    // Defer to wss.handleUpgrade after we define wss below; if wss not ready yet, this will be no-op.
+    if (wss && typeof wss.handleUpgrade === 'function') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        try {
+          wss.emit('connection', ws, req);
+        } catch (e) {
+          console.error('error emitting connection after handleUpgrade', e && e.message ? e.message : e);
+          try { socket.destroy(); } catch (ex) {}
+        }
+      });
+      return;
+    }
+  } catch (err) {
+    console.error('upgrade handle error', err && err.message ? err.message : err);
+  }
+
+  // fallback: close socket politely if not handled
+  try { socket.end(); } catch(e){}
 });
 
-const wss = new WebSocket.Server({ server, path: wssPath });
+const wss = new WebSocket.Server({ noServer: true });
+
+// Accept upgrades only for matching path; this centralizes path check and logging
+server.on('upgrade', (req, socket, head) => {
+  const pathname = req.url ? req.url.split('?')[0] : '';
+  if (pathname === wssPath) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    // Not the WebSocket path; close connection
+    try { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); } catch(e){}
+  }
+});
 
 // WSS connection handler
 wss.on('connection', (ws, req) => {
