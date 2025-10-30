@@ -152,6 +152,19 @@ app.post('/twilio/transcribe', async (req, res) => {
 // HTTP + WSS server
 const server = http.createServer(app);
 const wssPath = (CALL_PROFILE.media && CALL_PROFILE.media.twilio_stream_path) ? CALL_PROFILE.media.twilio_stream_path : '/twilio';
+// Debug upgrade: logga ogni richiesta di upgrade (handshake WS) per capire perché viene rifiutata
+server.on('upgrade', (req, socket, head) => {
+  try {
+    console.log('--- UPGRADE REQUEST ---');
+    console.log('url:', req.url);
+    console.log('method:', req.method);
+    console.log('headers:', JSON.stringify(req.headers, Object.keys(req.headers).sort(), 2));
+    console.log('-----------------------');
+  } catch (e) {
+    console.error('upgrade log error', e && e.message ? e.message : e);
+  }
+  // Non chiudere la socket qui: lascia che WebSocket.Server la gestisca
+});
 const wss = new WebSocket.Server({ server, path: wssPath });
 
 // WSS connection handler
