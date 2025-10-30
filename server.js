@@ -25,6 +25,22 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(express.static('public'));
 
+// Permetti connessioni websocket dal browser verso il tuo dominio (modifica per produzione)
+app.use((req, res, next) => {
+  // consente risorse da se stesso; consente connect only a wss sul tuo dominio
+  const domain = (process.env.SERVER_BASE_URL || 'https://giulia-outbound-aqae.up.railway.app').replace(/^https?:\/\//, '');
+  const csp = [
+    "default-src 'self' 'unsafe-inline' https: data:",
+    `connect-src 'self' wss://${domain} https:`,
+    "img-src 'self' data: https:",
+    "font-src 'self' https:",
+    "style-src 'self' 'unsafe-inline' https:",
+    "script-src 'self' 'unsafe-inline' https:"
+  ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
+  next();
+});
+
 // Request logger (Twilio relevant)
 app.use((req, res, next) => {
   if ((req.path || '').startsWith('/twilio') || req.path === '/start-call') {
